@@ -21,7 +21,6 @@ def get_tax(apn):
             extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
         )
         
-        # THE FIX: Hide the fact that we are a bot from the county's firewall
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
         page = context.new_page()
@@ -30,15 +29,30 @@ def get_tax(apn):
             print(f"[{apn}] Visiting homepage first to establish session...")
             page.goto("https://propertytax.alamedacountyca.gov/", wait_until="domcontentloaded", timeout=30000)
             
-            # THE FIX: Press 'Escape' to dismiss the "Important Notice 2025-26" modal!
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(2000) 
+            print(f"[{apn}] Waiting for popups to animate in so we can destroy them...")
+            page.wait_for_timeout(3500) 
+            
+            page.evaluate('''() => {
+                const buttons = Array.from(document.querySelectorAll('button, a'));
+                buttons.forEach(btn => {
+                    const t = btn.innerText.toLowerCase().trim();
+                    if (t === 'ok' || t === 'close' || t === 'accept' || t === 'dismiss' || t.includes('×')) {
+                        try { btn.click(); } catch(e) {}
+                    }
+                });
+            }''')
+            
+            for _ in range(3):
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+                
+            page.evaluate('''() => {
+                document.querySelectorAll('.modal-backdrop, .overlay, .cdk-overlay-backdrop, .modal').forEach(el => el.remove());
+                document.body.classList.remove('modal-open');
+            }''')
             
             print(f"[{apn}] Navigating directly to Account Summary...")
             page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-            
-            # Press escape again just in case the modal follows us to the new page
-            page.keyboard.press("Escape")
             
             print(f"[{apn}] Waiting for website database to populate the real numbers...")
             try:
@@ -67,7 +81,6 @@ def get_tax(apn):
             if tracer_match:
                 tax_results.append(tracer_match.group(1).strip())
             
-            # Use negative lookbehind to ensure we NEVER grab the "Sub Total" from the header Cart
             totals = re.findall(r'(?<!Sub\s)(Total:\s*\$[0-9,]+\.\d{2})', clean_text, re.IGNORECASE)
             if totals:
                 real_totals = [t for t in totals if "$0.00" not in t]
@@ -125,44 +138,60 @@ def requires_notification(results):
         
     return True
 
-def send_email(apn, tax_info):
+# THE FIX: This function now accepts a LIST of all APNs that need attention
+def send_combined_email(alerts_list):
     if not EMAIL_USER or not EMAIL_PASS:
-        print(f"[{apn}] Credentials missing. Skipping email.")
+        print("Credentials missing. Skipping email.")
         return
 
     msg = EmailMessage()
-    msg['Subject'] = f"Alameda Property Tax Update: APN {apn}"
+    msg['Subject'] = f"Alameda Property Tax Alert: Action Required"
     msg['From'] = EMAIL_USER
     msg['To'] = EMAIL_USER 
     
-    direct_link = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
+    # 1. Build Plain Text version
+    text_content = "Automated Property Tax Check\n\n"
+    text_content += "The following APNs require your attention (unpaid balance or lookup error):\n\n"
     
-    text_content = f"Automated Property Tax Check for APN: {apn}\n\n"
-    text_content += "Account Summary:\n"
-    for item in tax_info:
-        text_content += f"- {item}\n"
-    text_content += f"\nView the official portal here: {direct_link}"
-    
+    for alert in alerts_list:
+        apn = alert['apn']
+        text_content += f"--- APN: {apn} ---\n"
+        for item in alert['results']:
+            text_content += f"- {item}\n"
+        text_content += f"Link: https://propertytax.alamedacountyca.gov/account-summary?apn={apn}\n\n"
+        
     msg.set_content(text_content)
     
-    html_list_items = "".join(
-        [f"<li style='margin-bottom: 10px; padding: 12px; background-color: #f8f9fa; border-left: 4px solid #0056b3; border-radius: 4px;'>{item}</li>" for item in tax_info]
-    )
-    
-    html_content = f"""
+    # 2. Build HTML version
+    html_content = """
     <html>
       <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
         <h2 style="color: #0056b3; margin-bottom: 5px;">Alameda County Tax Alert</h2>
-        <p style="font-size: 16px;">Here is the latest automated property tax check for <strong>APN: {apn}</strong>.</p>
+        <p style="font-size: 16px;">The following APNs require your attention (unpaid balance or lookup error):</p>
+    """
+    
+    for alert in alerts_list:
+        apn = alert['apn']
+        direct_link = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
         
-        <h3 style="border-bottom: 2px solid #eee; padding-bottom: 8px; margin-top: 25px;">Account Summary:</h3>
+        html_list_items = "".join(
+            [f"<li style='margin-bottom: 10px; padding: 12px; background-color: #f8f9fa; border-left: 4px solid #0056b3; border-radius: 4px;'>{item}</li>" for item in alert['results']]
+        )
+        
+        html_content += f"""
+        <h3 style="border-bottom: 2px solid #eee; padding-bottom: 8px; margin-top: 25px;">APN: {apn}</h3>
         <ul style="list-style-type: none; padding: 0; font-size: 16px;">
           {html_list_items}
         </ul>
-        
-        <div style="margin-top: 30px;">
-            <a href="{direct_link}" style="background-color: #0056b3; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">View Official Tax Portal</a>
+        <div style="margin-top: 15px; margin-bottom: 30px;">
+            <a href="{direct_link}" style="background-color: #0056b3; color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block; font-size: 14px;">View Official Portal for {apn}</a>
         </div>
+        """
+        
+    html_content += """
+        <p style="margin-top: 40px; font-size: 12px; color: #777; border-top: 1px solid #eee; padding-top: 10px;">
+          This is an automated message generated by your GitHub Actions workflow.
+        </p>
       </body>
     </html>
     """
@@ -173,17 +202,19 @@ def send_email(apn, tax_info):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(EMAIL_USER, EMAIL_PASS)
             smtp.send_message(msg)
-        print(f"[{apn}] Formatted HTML email sent successfully!")
+        print("Combined formatted HTML email sent successfully!")
     except Exception as e:
-        print(f"[{apn}] Failed to send email: {e}")
+        print(f"Failed to send email: {e}")
 
 if __name__ == "__main__":
     if not APNS_RAW:
         print("Error: PROPERTY_APN secret is empty.")
     else:
         apn_list = [apn.strip() for apn in APNS_RAW.split(",") if apn.strip()]
-        
         print(f"Starting Tax Lookup for {len(apn_list)} APN(s)...")
+        
+        # THE FIX: Create an empty list to gather all flags before sending emails
+        alerts_to_send = []
         
         for current_apn in apn_list:
             print(f"\n--- Processing APN: {current_apn} ---")
@@ -191,7 +222,15 @@ if __name__ == "__main__":
             print(f"[{current_apn}] Scraped Data: {results}")
             
             if requires_notification(results):
-                print(f"[{current_apn}] ACTION REQUIRED: Unpaid balance or error detected. Sending email...")
-                send_email(current_apn, results)
+                print(f"[{current_apn}] ACTION REQUIRED: Queuing for combined email alert...")
+                # Add the data to our batch list
+                alerts_to_send.append({'apn': current_apn, 'results': results})
             else:
-                print(f"[{current_apn}] Amount is $0.00 or fully paid. Email not sent.")
+                print(f"[{current_apn}] Amount is $0.00 or fully paid. No action needed.")
+                
+        # After checking all APNs, check if our list has anything in it
+        if alerts_to_send:
+            print(f"\nSending a single combined email for {len(alerts_to_send)} APN(s)...")
+            send_combined_email(alerts_to_send)
+        else:
+            print("\nAll APNs checked. No alerts needed. No email sent.")
