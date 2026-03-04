@@ -3,7 +3,7 @@ import smtplib
 from email.message import EmailMessage
 from playwright.sync_api import sync_playwright
 
-# Fetch variables from GitHub Secrets
+# Fetch variables from GitHub Secrets for APN, GMAIL
 APN = os.environ.get("PROPERTY_APN", "").strip()
 EMAIL_USER = os.environ.get("EMAIL_USER", "").strip()
 EMAIL_PASS = os.environ.get("EMAIL_PASS", "").strip()
