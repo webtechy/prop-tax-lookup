@@ -14,51 +14,52 @@ def get_tax(apn):
     target_url = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
     
     with sync_playwright() as p:
-        # Launching with stealth arguments
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(
             viewport={'width': 1280, 'height': 800},
-            # Updated to a newer Chrome user-agent to avoid WAF blocks
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-            }
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
         )
+        
+        # THE FIX: Hide the fact that we are a bot from the county's firewall
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
         page = context.new_page()
         
         try:
             print(f"[{apn}] Visiting homepage first to establish session...")
-            # Using domcontentloaded is safer than networkidle for SPAs
             page.goto("https://propertytax.alamedacountyca.gov/", wait_until="domcontentloaded", timeout=30000)
+            
+            # THE FIX: Press 'Escape' to dismiss the "Important Notice 2025-26" modal!
+            page.keyboard.press("Escape")
             page.wait_for_timeout(2000) 
             
-            print(f"[{apn}] Navigating directly to Account Summary: {target_url}")
-            # THE FIX: Changed from 'networkidle' to 'domcontentloaded' to avoid hanging on background trackers
+            print(f"[{apn}] Navigating directly to Account Summary...")
             page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             
-            print(f"[{apn}] Waiting for website database to populate the real numbers (Looking for 'Tracer')...")
+            # Press escape again just in case the modal follows us to the new page
+            page.keyboard.press("Escape")
+            
+            print(f"[{apn}] Waiting for website database to populate the real numbers...")
             try:
                 page.wait_for_function(
                     '''() => {
                         const text = document.body.innerText.toLowerCase();
                         return text.includes("tracer") || text.includes("tax summary") || text.includes("no results");
                     }''',
-                    timeout=20000
+                    timeout=25000
                 )
             except Exception:
-                print(f"[{apn}] Warning: Wait timed out. The site might be extremely slow or blocking the bot.")
+                print(f"[{apn}] Warning: Wait timed out. Proceeding to scrape anyway...")
             
-            # Final buffer to let the numbers render into the HTML
             page.wait_for_timeout(3000)
             
             raw_text = page.locator("body").inner_text()
             clean_text = re.sub(r'\s+', ' ', raw_text)
             
-            # THE FIX: We ONLY consider it a success if we explicitly see "Tracer" or "Tax Summary"
             if "Tracer" not in clean_text and "Tax Summary" not in clean_text:
                 snippet = clean_text[:300] if clean_text.strip() else "[Blank Page]"
-                return [f"ERROR: Could not load actual tax data. The firewall may be blocking GitHub Actions. What the bot saw: '{snippet}...'"]
+                return [f"ERROR: Could not load actual tax data. The firewall or a popup is blocking the bot. What the bot saw: '{snippet}...'"]
             
             tax_results = []
             
@@ -66,7 +67,8 @@ def get_tax(apn):
             if tracer_match:
                 tax_results.append(tracer_match.group(1).strip())
             
-            totals = re.findall(r'(Total:\s*\$[0-9,]+\.\d{2})', clean_text, re.IGNORECASE)
+            # Use negative lookbehind to ensure we NEVER grab the "Sub Total" from the header Cart
+            totals = re.findall(r'(?<!Sub\s)(Total:\s*\$[0-9,]+\.\d{2})', clean_text, re.IGNORECASE)
             if totals:
                 real_totals = [t for t in totals if "$0.00" not in t]
                 tax_results.append(real_totals[-1].strip() if real_totals else totals[-1].strip())
