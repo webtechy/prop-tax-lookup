@@ -27,10 +27,11 @@ def get_tax(apn):
         
         try:
             print(f"[{apn}] Step 1: Opening the homepage front door...")
-            page.goto("https://propertytax.alamedacountyca.gov/", wait_until="networkidle", timeout=60000)
+            # THE FIX: Changed to 'domcontentloaded' to prevent the 60-second networkidle crash!
+            page.goto("https://propertytax.alamedacountyca.gov/", wait_until="domcontentloaded", timeout=60000)
             
             print(f"[{apn}] Step 2: Closing the 'Important Notice' popup...")
-            page.wait_for_timeout(2000) 
+            page.wait_for_timeout(3000) # Give the popup a moment to animate in
             page.keyboard.press("Escape")
             # Click any 'close' buttons just to be certain
             page.evaluate('''() => {
