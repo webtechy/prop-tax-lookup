@@ -106,4 +106,116 @@ def get_tax(apn):
             if not tax_results:
                 tax_results = ["Amount is $0.00 or fully paid."]
                 
-            return {"results": tax_results, "screenshot": screenshot
+            return {"results": tax_results, "screenshot": screenshot_path}
+            
+        except Exception as e:
+            # If a hard crash happens (like failing to find a button), take a screenshot of the failure
+            try:
+                page.screenshot(path=screenshot_path, full_page=True)
+                print(f"[{apn}] Error screenshot captured.")
+            except Exception:
+                pass
+            return {"results": [f"ERROR during interaction flow: {str(e)}"], "screenshot": screenshot_path}
+        finally:
+            browser.close()
+
+def send_combined_email(all_results):
+    if not EMAIL_USER or not EMAIL_PASS:
+        print("Credentials missing. Skipping email.")
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = f"Alameda Property Tax Debug Report"
+    msg['From'] = EMAIL_USER
+    msg['To'] = EMAIL_USER 
+    
+    # 1. Build Plain Text version
+    text_content = "Automated Property Tax Check Summary\n\n"
+    for item in all_results:
+        apn = item['apn']
+        text_content += f"--- APN: {apn} ---\n"
+        for res in item['results']:
+            text_content += f"- {res}\n"
+        text_content += "\n"
+        
+    msg.set_content(text_content)
+    
+    # 2. Build HTML version
+    html_content = """
+    <html>
+      <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #0056b3; margin-bottom: 5px;">Alameda County Tax Summary</h2>
+        <p style="font-size: 16px;">Here is the status report for your APNs. <strong>Check the attachments for visual screenshots of what the bot saw!</strong></p>
+    """
+    
+    for item in all_results:
+        apn = item['apn']
+        direct_link = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
+        
+        is_error = any("ERROR" in r for r in item['results'])
+        border_color = "#dc3545" if is_error else "#0056b3"
+        bg_color = "#fff3f3" if is_error else "#f8f9fa"
+        
+        html_list_items = "".join(
+            [f"<li style='margin-bottom: 10px; padding: 12px; background-color: {bg_color}; border-left: 4px solid {border_color}; border-radius: 4px;'>{r}</li>" for r in item['results']]
+        )
+        
+        html_content += f"""
+        <h3 style="border-bottom: 2px solid #eee; padding-bottom: 8px; margin-top: 25px;">APN: {apn}</h3>
+        <ul style="list-style-type: none; padding: 0; font-size: 16px;">
+          {html_list_items}
+        </ul>
+        <div style="margin-top: 15px; margin-bottom: 30px;">
+            <a href="{direct_link}" style="background-color: #0056b3; color: white; padding: 10px 15px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block; font-size: 14px;">View Official Portal</a>
+        </div>
+        """
+        
+    html_content += """
+      </body>
+    </html>
+    """
+    
+    msg.add_alternative(html_content, subtype='html')
+    
+    # 3. Attach the Screenshots to the email!
+    for item in all_results:
+        screenshot_file = item.get('screenshot')
+        if screenshot_file and os.path.exists(screenshot_file):
+            try:
+                with open(screenshot_file, 'rb') as f:
+                    img_data = f.read()
+                msg.add_attachment(img_data, maintype='image', subtype='png', filename=screenshot_file)
+                print(f"Attached {screenshot_file} to email.")
+            except Exception as e:
+                print(f"Failed to attach {screenshot_file}: {e}")
+    
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(EMAIL_USER, EMAIL_PASS)
+            smtp.send_message(msg)
+        print("Master summary email (with screenshots) sent successfully!")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
+if __name__ == "__main__":
+    if not APNS_RAW:
+        print("Error: PROPERTY_APN secret is empty.")
+    else:
+        apn_list = [apn.strip() for apn in APNS_RAW.split(",") if apn.strip()]
+        print(f"Starting Tax Lookup for {len(apn_list)} APN(s)...")
+        
+        master_results = []
+        
+        for current_apn in apn_list:
+            print(f"\n--- Processing APN: {current_apn} ---")
+            data = get_tax(current_apn)
+            print(f"[{current_apn}] Scraped Data: {data['results']}")
+            master_results.append({
+                'apn': current_apn, 
+                'results': data['results'],
+                'screenshot': data.get('screenshot')
+            })
+                
+        if master_results:
+            print(f"\nSending a single combined email for all {len(master_results)} APN(s)...")
+            send_combined_email(master_results)
