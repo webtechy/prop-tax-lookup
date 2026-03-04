@@ -1,18 +1,28 @@
 name: Monthly Property Tax Lookup
 on:
   schedule:
-    - cron: '0 0 1 * *' # Runs at midnight on the 1st of every month
-  workflow_dispatch: # Allows you to run it manually for testing
+    - cron: '0 0 1 * *' # Runs 1st of every month
+  workflow_dispatch: # Allows you to press the "Run" button manually
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - setup-python:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
           python-version: '3.9'
-      - run: pip install playwright && playwright install chromium
-      - run: python lookup.py
+
+      - name: Install dependencies
+        run: |
+          pip install playwright
+          playwright install chromium
+
+      - name: Run lookup script
+        run: python lookup.py
         env:
           PROPERTY_APN: ${{ secrets.PROPERTY_APN }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
