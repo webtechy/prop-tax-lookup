@@ -1,25 +1,29 @@
 name: Monthly Alameda Property Tax Lookup
+
 on:
   schedule:
-    - cron: '0 0 1 * *' # Runs 1st of every month
-  workflow_dispatch: # Allows you to press the "Run" button manually
+    - cron: '0 0 1 * *' # Runs 1st of every month at midnight UTC
+  workflow_dispatch: # Allows manual trigger from the "Actions" tab
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+          cache: 'pip' # Speeds up subsequent runs
 
       - name: Install dependencies
         run: |
-          pip install playwright
+          pip install -r requirements.txt
+          # Install the Chromium browser and the Linux system libraries it needs
           playwright install chromium
+          playwright install-deps chromium
 
       - name: Run lookup script
         run: python proptaxlookup.py
@@ -27,3 +31,11 @@ jobs:
           PROPERTY_APN: ${{ secrets.PROPERTY_APN }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+
+      # Optional: Uploads a screenshot if the script fails (helps debugging)
+      - name: Upload Debug Screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: error_debug.png
