@@ -11,7 +11,6 @@ EMAIL_PASS = os.environ.get("EMAIL_PASS", "").strip()
 
 def get_tax(apn):
     apn = apn.strip()
-    target_url = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
@@ -27,39 +26,39 @@ def get_tax(apn):
         page = context.new_page()
         
         try:
-            print(f"[{apn}] Navigating directly to Account Summary...")
-            page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+            print(f"[{apn}] Step 1: Opening the homepage front door...")
+            page.goto("https://propertytax.alamedacountyca.gov/", wait_until="networkidle", timeout=60000)
             
-            print(f"[{apn}] Neutralizing popups and overlays...")
-            page.wait_for_timeout(3000) 
-            
-            # THE FIX: Inject CSS to permanently hide the cart, popups, and overlays so inner_text() ignores them
+            print(f"[{apn}] Step 2: Closing the 'Important Notice' popup...")
+            page.wait_for_timeout(2000) 
+            page.keyboard.press("Escape")
+            # Click any 'close' buttons just to be certain
             page.evaluate('''() => {
-                const style = document.createElement('style');
-                style.innerHTML = `
-                    .cdk-overlay-container, .modal-backdrop, .modal, .overlay, .cart-sidebar, app-cart { 
-                        display: none !important; 
-                        opacity: 0 !important; 
-                        pointer-events: none !important; 
-                    }
-                    body { overflow: auto !important; }
-                `;
-                document.head.appendChild(style);
-                
                 const buttons = Array.from(document.querySelectorAll('button, a'));
                 buttons.forEach(btn => {
                     const t = btn.innerText.toLowerCase().trim();
-                    if (t === 'ok' || t === 'close' || t === 'accept' || t === 'dismiss' || t.includes('×')) {
+                    if (t === 'close' || t.includes('×')) {
                         try { btn.click(); } catch(e) {}
                     }
                 });
             }''')
             
-            for _ in range(3):
-                page.keyboard.press("Escape")
-                page.wait_for_timeout(500)
-                
-            print(f"[{apn}] Waiting for website database to populate the real numbers...")
+            print(f"[{apn}] Step 3: Clicking the 'Secured' tax button...")
+            page.wait_for_timeout(1000)
+            # Use exact=True to avoid clicking the "Secured Monthly Payments" header link
+            secured_btn = page.get_by_text("Secured", exact=True).first
+            secured_btn.wait_for(state="visible", timeout=15000)
+            secured_btn.click()
+            
+            print(f"[{apn}] Step 4: Entering APN into the search box...")
+            search_box = page.locator('input[name="apn"]').first
+            search_box.wait_for(state="visible", timeout=15000)
+            search_box.fill(apn)
+            
+            print(f"[{apn}] Step 5: Submitting search...")
+            search_box.press("Enter")
+            
+            print(f"[{apn}] Step 6: Waiting for website database to populate the account summary...")
             try:
                 page.wait_for_function(
                     '''() => {
@@ -71,6 +70,7 @@ def get_tax(apn):
             except Exception:
                 print(f"[{apn}] Warning: Wait timed out. Proceeding to scrape anyway...")
             
+            # Buffer to let numbers fully render into the DOM
             page.wait_for_timeout(3000)
             
             raw_text = page.locator("body").inner_text()
@@ -78,7 +78,7 @@ def get_tax(apn):
             
             if "Tracer" not in clean_text and "Tax Summary" not in clean_text:
                 snippet = clean_text[:300] if clean_text.strip() else "[Blank Page]"
-                return [f"ERROR: Could not load tax data. Site may be down or firewall blocked. Bot saw: '{snippet}...'"]
+                return [f"ERROR: Could not load tax data. Bot saw: '{snippet}...'"]
             
             tax_results = []
             
@@ -106,7 +106,7 @@ def get_tax(apn):
             return tax_results if tax_results else ["Amount is $0.00 or fully paid."]
             
         except Exception as e:
-            return [f"Error during lookup: {str(e)}"]
+            return [f"ERROR during interaction flow: {str(e)}"]
         finally:
             browser.close()
 
@@ -143,7 +143,7 @@ def send_combined_email(all_results):
         apn = item['apn']
         direct_link = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
         
-        # Check if this APN has an error to color it red, otherwise use default blue/grey
+        # Color the box red if it errored, blue if successful
         is_error = any("ERROR" in r for r in item['results'])
         border_color = "#dc3545" if is_error else "#0056b3"
         bg_color = "#fff3f3" if is_error else "#f8f9fa"
