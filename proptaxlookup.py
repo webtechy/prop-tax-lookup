@@ -27,33 +27,27 @@ def get_tax(apn):
         
         try:
             print(f"[{apn}] Step 1: Opening the homepage front door...")
-            # THE FIX: Changed to 'domcontentloaded' to prevent the 60-second networkidle crash!
             page.goto("https://propertytax.alamedacountyca.gov/", wait_until="domcontentloaded", timeout=60000)
             
-            print(f"[{apn}] Step 2: Closing the 'Important Notice' popup...")
-            page.wait_for_timeout(3000) # Give the popup a moment to animate in
+            print(f"[{apn}] Step 2: Neutralizing 'Important Notice' popups...")
+            page.wait_for_timeout(3000) 
             page.keyboard.press("Escape")
-            # Click any 'close' buttons just to be certain
-            page.evaluate('''() => {
-                const buttons = Array.from(document.querySelectorAll('button, a'));
-                buttons.forEach(btn => {
-                    const t = btn.innerText.toLowerCase().trim();
-                    if (t === 'close' || t.includes('×')) {
-                        try { btn.click(); } catch(e) {}
-                    }
-                });
-            }''')
             
-            print(f"[{apn}] Step 3: Clicking the 'Secured' tax button...")
-            page.wait_for_timeout(1000)
-            # Use exact=True to avoid clicking the "Secured Monthly Payments" header link
-            secured_btn = page.get_by_text("Secured", exact=True).first
-            secured_btn.wait_for(state="visible", timeout=15000)
-            secured_btn.click()
+            print(f"[{apn}] Step 3: Navigating directly to the Search portal...")
+            # Bypassing the fragile button click by going straight to the organic search URL
+            page.goto("https://propertytax.alamedacountyca.gov/search", wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(2000)
+            page.keyboard.press("Escape") # Press escape again just in case the popup follows us
             
             print(f"[{apn}] Step 4: Entering APN into the search box...")
-            search_box = page.locator('input[name="apn"]').first
-            search_box.wait_for(state="visible", timeout=15000)
+            # Find the search box by looking for placeholder text, fallback to the first text box on screen
+            search_box = page.get_by_placeholder(re.compile(r"parcel|address|search", re.IGNORECASE)).first
+            try:
+                search_box.wait_for(state="visible", timeout=5000)
+            except Exception:
+                search_box = page.get_by_role("textbox").first
+                search_box.wait_for(state="visible", timeout=10000)
+                
             search_box.fill(apn)
             
             print(f"[{apn}] Step 5: Submitting search...")
