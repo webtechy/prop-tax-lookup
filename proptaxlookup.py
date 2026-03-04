@@ -5,12 +5,13 @@ from email.message import EmailMessage
 from playwright.sync_api import sync_playwright
 
 # Fetch variables from GitHub Secrets
-# Expecting a single APN or comma-separated list: "123-456-789, 987-654-321"
 APNS_RAW = os.environ.get("PROPERTY_APN", "").strip()
 EMAIL_USER = os.environ.get("EMAIL_USER", "").strip()
 EMAIL_PASS = os.environ.get("EMAIL_PASS", "").strip()
 
 def get_tax(apn):
+    # Clean up the APN in case there are stray spaces in the GitHub Secret
+    apn = apn.strip()
     target_url = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
     
     with sync_playwright() as p:
@@ -25,39 +26,41 @@ def get_tax(apn):
             print(f"[{apn}] Navigating directly to Account Summary: {target_url}")
             page.goto(target_url, wait_until="networkidle", timeout=60000)
             
-            # Wait for JavaScript to fully render the text
-            page.wait_for_timeout(5000)
+            # THE FIX: Force the scraper to wait for the actual data to hydrate!
+            # The county site will only show the word "Tracer" once the real data loads.
+            print(f"[{apn}] Waiting for website database to populate the numbers...")
+            try:
+                page.wait_for_function(
+                    '() => document.body.innerText.includes("Tracer") || document.body.innerText.includes("Tax History")',
+                    timeout=20000
+                )
+            except Exception:
+                print(f"[{apn}] Warning: Data took too long to load or the APN is invalid.")
             
-            # Dump the raw text of the entire body
+            # Small 2-second buffer to let the HTML finish rendering
+            page.wait_for_timeout(2000)
+            
             raw_text = page.locator("body").inner_text()
-            
-            # THE FIX: Flatten all hidden newlines and tabs into single spaces
             clean_text = re.sub(r'\s+', ' ', raw_text)
             
-            # Failsafe: Make sure we actually hit a tax page
-            if "Total:" not in clean_text and "installment" not in clean_text.lower():
-                return ["Could not find tax data. The APN might be invalid or the site layout changed heavily."]
+            # If it still doesn't see "Tracer", it means we are stuck on the dummy $0.00 template
+            if "Tracer" not in clean_text and "Tax History" not in clean_text:
+                return [f"Could not load tax data. The APN '{apn}' might be formatted incorrectly or the site is down."]
             
             tax_results = []
             
-            # 1. Regex to find the Total line (e.g., "Total: $9,418.30")
             total_match = re.search(r'(Total:\s*\$[0-9,]+\.\d{2})', clean_text, re.IGNORECASE)
             if total_match:
                 tax_results.append(total_match.group(1).strip())
                 
-            # 2. Regex to find the 1st installment status
-            # Matches strings like: "Your 1st installment of $4,709.15 Paid Nov 4, 2025"
             inst1 = re.search(r'((?:Your|The)?\s*1st installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
             if inst1:
                 tax_results.append(inst1.group(1).strip() + ".")
                 
-            # 3. Regex to find the 2nd installment status
-            # Matches strings like: "The 2nd installment of $4,709.15 due on 04/10/2026"
             inst2 = re.search(r'((?:Your|The)?\s*2nd installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
             if inst2:
                 tax_results.append(inst2.group(1).strip() + ".")
                 
-            # 4. Check for Delinquent Taxes
             delinq = re.search(r'(Delinquent Taxes.*?Amount Due[^\.]*\.)', clean_text, re.IGNORECASE)
             if delinq:
                 tax_results.append(delinq.group(1).strip())
@@ -70,46 +73,34 @@ def get_tax(apn):
             browser.close()
 
 def requires_notification(results):
-    """
-    Analyzes the scraped text. 
-    Ignores the "Total" line, and only flags a balance > 0 if an *installment* is due.
-    """
-    # 1. Always alert on errors
     for item in results:
         item_lower = item.lower()
-        if "error" in item_lower or "could not find" in item_lower or "not found" in item_lower or "could not extract" in item_lower:
+        if "error" in item_lower or "could not load" in item_lower or "could not extract" in item_lower:
             return True
 
     amount_due = 0.0
     found_installments = False
     
-    # 2. Calculate actual amount currently owed
     for item in results:
         item_lower = item.lower()
         
-        # Immediate alert if delinquent taxes exist and aren't paid
         if "delinquent" in item_lower and "paid" not in item_lower and "$0.00" not in item_lower:
             return True
             
-        # Only do math on the actual installment lines
         if "installment" in item_lower:
             found_installments = True
             
-            # If the text explicitly says it's already paid or redeemed, skip it ($0 due)
             if "paid" in item_lower or "redeemed" in item_lower:
                 continue
             
-            # If it doesn't say paid, extract the dollar amount and add it up
             matches = re.findall(r'\$([0-9,]+\.\d{2})', item)
             if matches:
                 numeric_val = float(matches[0].replace(',', ''))
                 amount_due += numeric_val
                 
-    # 3. The Decision
     if found_installments:
-        return amount_due > 0  # True if you owe money, False if both are paid
+        return amount_due > 0 
         
-    # Failsafe: if we didn't find any installments to check, alert just in case
     return True
 
 def send_email(apn, tax_info):
@@ -174,7 +165,6 @@ if __name__ == "__main__":
     if not APNS_RAW:
         print("Error: PROPERTY_APN secret is empty.")
     else:
-        # Split the string by commas and remove any extra spaces
         apn_list = [apn.strip() for apn in APNS_RAW.split(",") if apn.strip()]
         
         print(f"Starting Tax Lookup for {len(apn_list)} APN(s)...")
