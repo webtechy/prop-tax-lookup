@@ -10,42 +10,47 @@ EMAIL_USER = os.environ.get("EMAIL_USER", "").strip()
 EMAIL_PASS = os.environ.get("EMAIL_PASS", "").strip()
 
 def get_tax(apn):
-    # Clean up the APN in case there are stray spaces in the GitHub Secret
     apn = apn.strip()
     target_url = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Added standard browser arguments to help bypass Cloudflare/bot detection
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(
             viewport={'width': 1280, 'height': 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
         )
         page = context.new_page()
         
         try:
+            # THE FIX: Visit the homepage first to grab the required session cookies!
+            print(f"[{apn}] Visiting homepage first to establish a human session...")
+            page.goto("https://propertytax.alamedacountyca.gov/", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000) # Quick pause to let cookies settle
+            
+            # Now navigate to the actual APN page
             print(f"[{apn}] Navigating directly to Account Summary: {target_url}")
             page.goto(target_url, wait_until="networkidle", timeout=60000)
             
-            # THE FIX: Force the scraper to wait for the actual data to hydrate!
-            # The county site will only show the word "Tracer" once the real data loads.
             print(f"[{apn}] Waiting for website database to populate the numbers...")
             try:
-                page.wait_for_function(
-                    '() => document.body.innerText.includes("Tracer") || document.body.innerText.includes("Tax History")',
-                    timeout=20000
-                )
+                # Tell Playwright to look specifically for the words "Total:" or "Tax History"
+                page.locator("text=/Total:|Tax History|No results/i").first.wait_for(timeout=25000)
             except Exception:
-                print(f"[{apn}] Warning: Data took too long to load or the APN is invalid.")
+                print(f"[{apn}] Warning: Standard wait timed out. Checking page anyway...")
             
-            # Small 2-second buffer to let the HTML finish rendering
+            # Small buffer to ensure all text is rendered
             page.wait_for_timeout(2000)
             
             raw_text = page.locator("body").inner_text()
             clean_text = re.sub(r'\s+', ' ', raw_text)
             
-            # If it still doesn't see "Tracer", it means we are stuck on the dummy $0.00 template
-            if "Tracer" not in clean_text and "Tax History" not in clean_text:
-                return [f"Could not load tax data. The APN '{apn}' might be formatted incorrectly or the site is down."]
+            # If the required words STILL aren't there, trigger our new X-Ray Debugger
+            if "Total:" not in clean_text and "Tax History" not in clean_text:
+                # Grab the first 250 characters of whatever the bot is ACTUALLY seeing
+                snippet = clean_text[:250] if clean_text.strip() else "[Blank Page]"
+                return [f"ERROR: Could not load tax data. The site might be blocking GitHub Actions. What the bot saw: '{snippet}...'"]
             
             tax_results = []
             
@@ -75,7 +80,8 @@ def get_tax(apn):
 def requires_notification(results):
     for item in results:
         item_lower = item.lower()
-        if "error" in item_lower or "could not load" in item_lower or "could not extract" in item_lower:
+        # Ensure our new error X-Ray forces an email to send
+        if "error" in item_lower or "could not load" in item_lower or "what the bot saw" in item_lower:
             return True
 
     amount_due = 0.0
@@ -115,7 +121,6 @@ def send_email(apn, tax_info):
     
     direct_link = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
     
-    # Plain Text Fallback
     text_content = f"Automated Property Tax Check for APN: {apn}\n\n"
     text_content += "Account Summary:\n"
     for item in tax_info:
@@ -124,7 +129,6 @@ def send_email(apn, tax_info):
     
     msg.set_content(text_content)
     
-    # HTML Content
     html_list_items = "".join(
         [f"<li style='margin-bottom: 10px; padding: 12px; background-color: #f8f9fa; border-left: 4px solid #0056b3; border-radius: 4px;'>{item}</li>" for item in tax_info]
     )
@@ -143,10 +147,6 @@ def send_email(apn, tax_info):
         <div style="margin-top: 30px;">
             <a href="{direct_link}" style="background-color: #0056b3; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">View Official Tax Portal</a>
         </div>
-        
-        <p style="margin-top: 40px; font-size: 12px; color: #777; border-top: 1px solid #eee; padding-top: 10px;">
-          This is an automated message generated by your GitHub Actions workflow.
-        </p>
       </body>
     </html>
     """
