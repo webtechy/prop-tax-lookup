@@ -14,7 +14,6 @@ def get_tax(apn):
     target_url = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
     
     with sync_playwright() as p:
-        # Added standard browser arguments to help bypass Cloudflare/bot detection
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(
             viewport={'width': 1280, 'height': 800},
@@ -24,33 +23,37 @@ def get_tax(apn):
         page = context.new_page()
         
         try:
-            # THE FIX: Visit the homepage first to grab the required session cookies!
-            print(f"[{apn}] Visiting homepage first to establish a human session...")
+            print(f"[{apn}] Visiting homepage first to establish session...")
             page.goto("https://propertytax.alamedacountyca.gov/", wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2000) # Quick pause to let cookies settle
+            page.wait_for_timeout(2000) 
             
-            # Now navigate to the actual APN page
             print(f"[{apn}] Navigating directly to Account Summary: {target_url}")
             page.goto(target_url, wait_until="networkidle", timeout=60000)
             
-            print(f"[{apn}] Waiting for website database to populate the numbers...")
+            print(f"[{apn}] Waiting for website database to populate the real numbers...")
             try:
-                # Tell Playwright to look specifically for the words "Total:" or "Tax History"
-                page.locator("text=/Total:|Tax History|No results/i").first.wait_for(timeout=25000)
+                page.wait_for_function(
+                    '''() => {
+                        const text = document.body.innerText.toLowerCase();
+                        const hasInstallment = text.includes("installment");
+                        const hasRealTotal = text.includes("total:") && !text.includes("total: $0.00");
+                        const hasError = text.includes("no results") || text.includes("not found");
+                        
+                        return hasInstallment || hasRealTotal || hasError;
+                    }''',
+                    timeout=30000
+                )
             except Exception:
-                print(f"[{apn}] Warning: Standard wait timed out. Checking page anyway...")
+                print(f"[{apn}] Warning: Wait timed out. The site might be extremely slow.")
             
-            # Small buffer to ensure all text is rendered
             page.wait_for_timeout(2000)
             
             raw_text = page.locator("body").inner_text()
             clean_text = re.sub(r'\s+', ' ', raw_text)
             
-            # If the required words STILL aren't there, trigger our new X-Ray Debugger
-            if "Total:" not in clean_text and "Tax History" not in clean_text:
-                # Grab the first 250 characters of whatever the bot is ACTUALLY seeing
+            if "Total:" not in clean_text and "installment" not in clean_text.lower():
                 snippet = clean_text[:250] if clean_text.strip() else "[Blank Page]"
-                return [f"ERROR: Could not load tax data. The site might be blocking GitHub Actions. What the bot saw: '{snippet}...'"]
+                return [f"ERROR: Could not load tax data. What the bot saw: '{snippet}...'"]
             
             tax_results = []
             
@@ -78,35 +81,45 @@ def get_tax(apn):
             browser.close()
 
 def requires_notification(results):
+    # 1. Always send email if an error is detected
     for item in results:
         item_lower = item.lower()
-        # Ensure our new error X-Ray forces an email to send
         if "error" in item_lower or "could not load" in item_lower or "what the bot saw" in item_lower:
             return True
 
-    amount_due = 0.0
-    found_installments = False
+    unpaid_balance_found = False
+    dollar_signs_seen = False
     
+    # 2. Extract and check every single dollar amount found
     for item in results:
         item_lower = item.lower()
+        matches = re.findall(r'\$([0-9,]+\.\d{2})', item)
         
-        if "delinquent" in item_lower and "paid" not in item_lower and "$0.00" not in item_lower:
-            return True
+        if matches:
+            dollar_signs_seen = True
             
-        if "installment" in item_lower:
-            found_installments = True
+        # If the sentence explicitly says paid/redeemed, ignore its dollar amount ($0 owed)
+        if "paid" in item_lower or "redeemed" in item_lower:
+            continue
             
-            if "paid" in item_lower or "redeemed" in item_lower:
-                continue
+        # Check the parsed amounts in this line
+        for match in matches:
+            val = float(match.replace(',', ''))
             
-            matches = re.findall(r'\$([0-9,]+\.\d{2})', item)
-            if matches:
-                numeric_val = float(matches[0].replace(',', ''))
-                amount_due += numeric_val
-                
-    if found_installments:
-        return amount_due > 0 
+            if val > 0.0:
+                # If we hit a number > 0, we need to make sure it's not JUST the "Total: $9000" 
+                # line while the installments below it are fully paid.
+                if "total" in item_lower and len(results) > 1:
+                    pass # Ignore the Total line if we have specific installment details below it
+                else:
+                    unpaid_balance_found = True
+
+    # 3. Final Decision
+    if dollar_signs_seen:
+        # If we saw dollar signs, but unpaid_balance_found is False, it means everything was $0.00 or Paid!
+        return unpaid_balance_found
         
+    # Failsafe: if we literally found no dollar amounts, send an email to warn us something is weird
     return True
 
 def send_email(apn, tax_info):
@@ -178,4 +191,5 @@ if __name__ == "__main__":
                 print(f"[{current_apn}] ACTION REQUIRED: Unpaid balance or error detected. Sending email...")
                 send_email(current_apn, results)
             else:
-                print(f"[{current_apn}] ALL CLEARED: Installments show as paid. Skipping email.")
+                # Explicitly logging that the amount was $0 and blocking the email
+                print(f"[{current_apn}] Amount is $0.00 or fully paid. Email not sent.")
