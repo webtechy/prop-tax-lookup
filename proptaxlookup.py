@@ -3,33 +3,69 @@ import smtplib
 from email.message import EmailMessage
 from playwright.sync_api import sync_playwright
 
-# Config from GitHub Secrets
-APN = os.environ["PROPERTY_APN"]
-EMAIL_USER = os.environ["EMAIL_USER"]
-EMAIL_PASS = os.environ["EMAIL_PASS"] # Use a Google "App Password"
+# Fetch variables from GitHub Secrets
+APN = os.environ.get("PROPERTY_APN", "").strip()
+EMAIL_USER = os.environ.get("EMAIL_USER", "").strip()
+EMAIL_PASS = os.environ.get("EMAIL_PASS", "").strip()
 
 def get_tax():
+    # Construct URL - Ensuring no hidden spaces or characters
     url = f"https://propertytax.alamedacountyca.gov{APN}"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url)
-        page.wait_for_selector(".amount-due", timeout=15000)
-        amounts = [amt.inner_text() for amt in page.query_selector_all(".amount-due")]
-        browser.close()
-        return amounts
-
-def send_email(body):
-    msg = EmailMessage()
-    msg.set_content(f"Alameda County Tax Update for {APN}:\n\n" + "\n".join(body))
-    msg['Subject'] = "Property Tax Lookup Result"
-    msg['From'] = EMAIL_USER
-    msg['To'] = EMAIL_USER # Sends to yourself
     
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-        smtp.login(EMAIL_USER, EMAIL_PASS)
-        smtp.send_message(msg)
+    with sync_playwright() as p:
+        # Launch browser
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        page = context.new_page()
+        
+        try:
+            print(f"Navigating to Alameda County Portal...")
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            
+            # Wait for the specific tax amount elements to load
+            # Alameda uses '.amount-due' for the dollar figures
+            page.wait_for_selector(".amount-due", timeout=30000)
+            
+            # Scrape all instances of amount-due (usually 1st and 2nd installments)
+            amounts = page.query_selector_all(".amount-due")
+            tax_results = [amt.inner_text().strip() for amt in amounts]
+            
+            if not tax_results:
+                return ["No amounts found. The bill might not be posted yet."]
+            
+            return tax_results
+            
+        except Exception as e:
+            return [f"Error during lookup: {str(e)}"]
+        finally:
+            browser.close()
+
+def send_email(tax_info):
+    if not EMAIL_USER or not EMAIL_PASS:
+        print("Email credentials missing. Skipping email.")
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = f"Alameda Tax Alert: {APN}"
+    msg['From'] = EMAIL_USER
+    msg['To'] = EMAIL_USER # Sends the alert to yourself
+    
+    content = f"Automated Property Tax Check for APN: {APN}\n\n"
+    content += "\n".join(tax_info)
+    content += "\n\nView details here: https://propertytax.alamedacountyca.gov" + APN
+    
+    msg.set_content(content)
+    
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(EMAIL_USER, EMAIL_PASS)
+            smtp.send_message(msg)
+        print("Email sent successfully!")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
 
 if __name__ == "__main__":
-    data = get_tax()
-    send_email(data)
+    print("Starting Tax Lookup...")
+    results = get_tax()
+    print(f"Found: {results}")
+    send_email(results)
