@@ -9,8 +9,9 @@ EMAIL_USER = os.environ.get("EMAIL_USER", "").strip()
 EMAIL_PASS = os.environ.get("EMAIL_PASS", "").strip()
 
 def get_tax():
-    # FIXED URL: Added the missing /account-summary?apn= part
-    url = f"https://propertytax.alamedacountyca.gov{APN}"
+    # HARDCODED PATH TO PREVENT URL ERRORS
+    base_url = "https://propertytax.alamedacountyca.gov"
+    url = f"{base_url}?apn={APN}"
     
     with sync_playwright() as p:
         # Launch browser with a real User-Agent to avoid blocks
