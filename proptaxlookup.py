@@ -14,70 +14,71 @@ def get_tax(apn):
     target_url = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
     
     with sync_playwright() as p:
+        # Launching with stealth arguments
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(
             viewport={'width': 1280, 'height': 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
+            # Updated to a newer Chrome user-agent to avoid WAF blocks
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            }
         )
         page = context.new_page()
         
         try:
             print(f"[{apn}] Visiting homepage first to establish session...")
+            # Using domcontentloaded is safer than networkidle for SPAs
             page.goto("https://propertytax.alamedacountyca.gov/", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000) 
             
             print(f"[{apn}] Navigating directly to Account Summary: {target_url}")
-            page.goto(target_url, wait_until="networkidle", timeout=60000)
+            # THE FIX: Changed from 'networkidle' to 'domcontentloaded' to avoid hanging on background trackers
+            page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             
             print(f"[{apn}] Waiting for website database to populate the real numbers (Looking for 'Tracer')...")
             try:
-                # THE FIX: Explicitly wait for the unique "Tracer" or "Tax Summary" text to appear
                 page.wait_for_function(
                     '''() => {
-                        const text = document.body.innerText;
-                        return text.includes("Tracer") || text.includes("Tax Summary") || text.includes("No results");
+                        const text = document.body.innerText.toLowerCase();
+                        return text.includes("tracer") || text.includes("tax summary") || text.includes("no results");
                     }''',
-                    timeout=30000
+                    timeout=20000
                 )
             except Exception:
-                print(f"[{apn}] Warning: Wait timed out. The site might be extremely slow.")
+                print(f"[{apn}] Warning: Wait timed out. The site might be extremely slow or blocking the bot.")
             
-            # Buffer to let the final numbers render
+            # Final buffer to let the numbers render into the HTML
             page.wait_for_timeout(3000)
             
             raw_text = page.locator("body").inner_text()
             clean_text = re.sub(r'\s+', ' ', raw_text)
             
-            if "Total:" not in clean_text and "installment" not in clean_text.lower() and "Tracer" not in clean_text:
-                snippet = clean_text[:250] if clean_text.strip() else "[Blank Page]"
-                return [f"ERROR: Could not load tax data. What the bot saw: '{snippet}...'"]
+            # THE FIX: We ONLY consider it a success if we explicitly see "Tracer" or "Tax Summary"
+            if "Tracer" not in clean_text and "Tax Summary" not in clean_text:
+                snippet = clean_text[:300] if clean_text.strip() else "[Blank Page]"
+                return [f"ERROR: Could not load actual tax data. The firewall may be blocking GitHub Actions. What the bot saw: '{snippet}...'"]
             
             tax_results = []
             
-            # 1. Look for the Tracer # to confirm we are on the right data block
             tracer_match = re.search(r'(\d{4}-\d{4}\s*Secured\s*Tracer #\s*\d+|Tracer #\s*\d+)', clean_text, re.IGNORECASE)
             if tracer_match:
                 tax_results.append(tracer_match.group(1).strip())
             
-            # 2. Extract Total (Using findall to bypass hidden dummy templates at the top of the HTML)
             totals = re.findall(r'(Total:\s*\$[0-9,]+\.\d{2})', clean_text, re.IGNORECASE)
             if totals:
-                # If it finds multiple Totals, prioritize the one that isn't $0.00
                 real_totals = [t for t in totals if "$0.00" not in t]
                 tax_results.append(real_totals[-1].strip() if real_totals else totals[-1].strip())
                 
-            # 3. Extract 1st Installment
             inst1s = re.findall(r'((?:Your|The)?\s*1st installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
             if inst1s:
                 tax_results.append(inst1s[-1].strip() + ".")
                 
-            # 4. Extract 2nd Installment
             inst2s = re.findall(r'((?:Your|The)?\s*2nd installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
             if inst2s:
                 tax_results.append(inst2s[-1].strip() + ".")
                 
-            # 5. Extract Delinquent Taxes
             delinqs = re.findall(r'(Delinquent Taxes.*?Amount Due[^\.]*\.)', clean_text, re.IGNORECASE)
             if delinqs:
                 tax_results.append(delinqs[-1].strip())
@@ -112,7 +113,6 @@ def requires_notification(results):
             val = float(match.replace(',', ''))
             
             if val > 0.0:
-                # Ignore the Total line for math purposes, only trigger on unpaid installments
                 if "total" in item_lower and len(results) > 2:
                     pass 
                 else:
