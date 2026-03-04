@@ -22,7 +22,7 @@ jobs:
           playwright install chromium
 
       - name: Run lookup script
-        run: python lookup.py
+        run: python proptaxlookup.py
         env:
           PROPERTY_APN: ${{ secrets.PROPERTY_APN }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
