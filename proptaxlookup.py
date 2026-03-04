@@ -30,48 +30,57 @@ def get_tax(apn):
             print(f"[{apn}] Navigating directly to Account Summary: {target_url}")
             page.goto(target_url, wait_until="networkidle", timeout=60000)
             
-            print(f"[{apn}] Waiting for website database to populate the real numbers...")
+            print(f"[{apn}] Waiting for website database to populate the real numbers (Looking for 'Tracer')...")
             try:
+                # THE FIX: Explicitly wait for the unique "Tracer" or "Tax Summary" text to appear
                 page.wait_for_function(
                     '''() => {
-                        const text = document.body.innerText.toLowerCase();
-                        const hasInstallment = text.includes("installment");
-                        const hasRealTotal = text.includes("total:") && !text.includes("total: $0.00");
-                        const hasError = text.includes("no results") || text.includes("not found");
-                        
-                        return hasInstallment || hasRealTotal || hasError;
+                        const text = document.body.innerText;
+                        return text.includes("Tracer") || text.includes("Tax Summary") || text.includes("No results");
                     }''',
                     timeout=30000
                 )
             except Exception:
                 print(f"[{apn}] Warning: Wait timed out. The site might be extremely slow.")
             
-            page.wait_for_timeout(2000)
+            # Buffer to let the final numbers render
+            page.wait_for_timeout(3000)
             
             raw_text = page.locator("body").inner_text()
             clean_text = re.sub(r'\s+', ' ', raw_text)
             
-            if "Total:" not in clean_text and "installment" not in clean_text.lower():
+            if "Total:" not in clean_text and "installment" not in clean_text.lower() and "Tracer" not in clean_text:
                 snippet = clean_text[:250] if clean_text.strip() else "[Blank Page]"
                 return [f"ERROR: Could not load tax data. What the bot saw: '{snippet}...'"]
             
             tax_results = []
             
-            total_match = re.search(r'(Total:\s*\$[0-9,]+\.\d{2})', clean_text, re.IGNORECASE)
-            if total_match:
-                tax_results.append(total_match.group(1).strip())
+            # 1. Look for the Tracer # to confirm we are on the right data block
+            tracer_match = re.search(r'(\d{4}-\d{4}\s*Secured\s*Tracer #\s*\d+|Tracer #\s*\d+)', clean_text, re.IGNORECASE)
+            if tracer_match:
+                tax_results.append(tracer_match.group(1).strip())
+            
+            # 2. Extract Total (Using findall to bypass hidden dummy templates at the top of the HTML)
+            totals = re.findall(r'(Total:\s*\$[0-9,]+\.\d{2})', clean_text, re.IGNORECASE)
+            if totals:
+                # If it finds multiple Totals, prioritize the one that isn't $0.00
+                real_totals = [t for t in totals if "$0.00" not in t]
+                tax_results.append(real_totals[-1].strip() if real_totals else totals[-1].strip())
                 
-            inst1 = re.search(r'((?:Your|The)?\s*1st installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
-            if inst1:
-                tax_results.append(inst1.group(1).strip() + ".")
+            # 3. Extract 1st Installment
+            inst1s = re.findall(r'((?:Your|The)?\s*1st installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
+            if inst1s:
+                tax_results.append(inst1s[-1].strip() + ".")
                 
-            inst2 = re.search(r'((?:Your|The)?\s*2nd installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
-            if inst2:
-                tax_results.append(inst2.group(1).strip() + ".")
+            # 4. Extract 2nd Installment
+            inst2s = re.findall(r'((?:Your|The)?\s*2nd installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
+            if inst2s:
+                tax_results.append(inst2s[-1].strip() + ".")
                 
-            delinq = re.search(r'(Delinquent Taxes.*?Amount Due[^\.]*\.)', clean_text, re.IGNORECASE)
-            if delinq:
-                tax_results.append(delinq.group(1).strip())
+            # 5. Extract Delinquent Taxes
+            delinqs = re.findall(r'(Delinquent Taxes.*?Amount Due[^\.]*\.)', clean_text, re.IGNORECASE)
+            if delinqs:
+                tax_results.append(delinqs[-1].strip())
             
             return tax_results if tax_results else ["Page loaded, but could not extract specific tax strings."]
             
@@ -81,7 +90,6 @@ def get_tax(apn):
             browser.close()
 
 def requires_notification(results):
-    # 1. Always send email if an error is detected
     for item in results:
         item_lower = item.lower()
         if "error" in item_lower or "could not load" in item_lower or "what the bot saw" in item_lower:
@@ -90,7 +98,6 @@ def requires_notification(results):
     unpaid_balance_found = False
     dollar_signs_seen = False
     
-    # 2. Extract and check every single dollar amount found
     for item in results:
         item_lower = item.lower()
         matches = re.findall(r'\$([0-9,]+\.\d{2})', item)
@@ -98,28 +105,22 @@ def requires_notification(results):
         if matches:
             dollar_signs_seen = True
             
-        # If the sentence explicitly says paid/redeemed, ignore its dollar amount ($0 owed)
         if "paid" in item_lower or "redeemed" in item_lower:
             continue
             
-        # Check the parsed amounts in this line
         for match in matches:
             val = float(match.replace(',', ''))
             
             if val > 0.0:
-                # If we hit a number > 0, we need to make sure it's not JUST the "Total: $9000" 
-                # line while the installments below it are fully paid.
-                if "total" in item_lower and len(results) > 1:
-                    pass # Ignore the Total line if we have specific installment details below it
+                # Ignore the Total line for math purposes, only trigger on unpaid installments
+                if "total" in item_lower and len(results) > 2:
+                    pass 
                 else:
                     unpaid_balance_found = True
 
-    # 3. Final Decision
     if dollar_signs_seen:
-        # If we saw dollar signs, but unpaid_balance_found is False, it means everything was $0.00 or Paid!
         return unpaid_balance_found
         
-    # Failsafe: if we literally found no dollar amounts, send an email to warn us something is weird
     return True
 
 def send_email(apn, tax_info):
@@ -191,5 +192,4 @@ if __name__ == "__main__":
                 print(f"[{current_apn}] ACTION REQUIRED: Unpaid balance or error detected. Sending email...")
                 send_email(current_apn, results)
             else:
-                # Explicitly logging that the amount was $0 and blocking the email
                 print(f"[{current_apn}] Amount is $0.00 or fully paid. Email not sent.")
