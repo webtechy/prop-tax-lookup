@@ -5,6 +5,7 @@ from email.message import EmailMessage
 from playwright.sync_api import sync_playwright
 
 # Fetch variables from GitHub Secrets
+# Expecting a single APN or comma-separated list: "123-456-789, 987-654-321"
 APNS_RAW = os.environ.get("PROPERTY_APN", "").strip()
 EMAIL_USER = os.environ.get("EMAIL_USER", "").strip()
 EMAIL_PASS = os.environ.get("EMAIL_PASS", "").strip()
@@ -21,42 +22,46 @@ def get_tax(apn):
         page = context.new_page()
         
         try:
-            print(f"[{apn}] Navigating to Account Summary: {target_url}")
+            print(f"[{apn}] Navigating directly to Account Summary: {target_url}")
             page.goto(target_url, wait_until="networkidle", timeout=60000)
             
-            # Wait for JS to render
+            # Wait for JavaScript to fully render the text
             page.wait_for_timeout(5000)
             
-            # Dump the raw text of the entire page
-            body_text = page.locator("body").inner_text()
+            # Dump the raw text of the entire body
+            raw_text = page.locator("body").inner_text()
+            
+            # THE FIX: Flatten all hidden newlines and tabs into single spaces
+            clean_text = re.sub(r'\s+', ' ', raw_text)
             
             # Failsafe: Make sure we actually hit a tax page
-            if "Total:" not in body_text and "installment" not in body_text.lower():
+            if "Total:" not in clean_text and "installment" not in clean_text.lower():
                 return ["Could not find tax data. The APN might be invalid or the site layout changed heavily."]
             
             tax_results = []
             
-            # 1. Regex to find the Total line (e.g., "Total: $12,345.67")
-            total_match = re.search(r'(Total:\s*\$[0-9,]+\.\d{2})', body_text, re.IGNORECASE)
+            # 1. Regex to find the Total line (e.g., "Total: $9,418.30")
+            total_match = re.search(r'(Total:\s*\$[0-9,]+\.\d{2})', clean_text, re.IGNORECASE)
             if total_match:
                 tax_results.append(total_match.group(1).strip())
                 
             # 2. Regex to find the 1st installment status
-            inst1 = re.search(r'(1st installment.*?\$[0-9,]+\.\d{2}.*?(?:due|paid|redeemed).*?\d{4})', body_text, re.IGNORECASE)
+            # Matches strings like: "Your 1st installment of $4,709.15 Paid Nov 4, 2025"
+            inst1 = re.search(r'((?:Your|The)?\s*1st installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
             if inst1:
-                tax_results.append(inst1.group(1).strip())
+                tax_results.append(inst1.group(1).strip() + ".")
                 
             # 3. Regex to find the 2nd installment status
-            inst2 = re.search(r'(2nd installment.*?\$[0-9,]+\.\d{2}.*?(?:due|paid|redeemed).*?\d{4})', body_text, re.IGNORECASE)
+            # Matches strings like: "The 2nd installment of $4,709.15 due on 04/10/2026"
+            inst2 = re.search(r'((?:Your|The)?\s*2nd installment.*?\$[0-9,]+\.\d{2}.*?(?:\d{4}))', clean_text, re.IGNORECASE)
             if inst2:
-                tax_results.append(inst2.group(1).strip())
+                tax_results.append(inst2.group(1).strip() + ".")
                 
             # 4. Check for Delinquent Taxes
-            delinq = re.search(r'(Delinquent Taxes.*?Amount Due[^\.]*\.)', body_text, re.IGNORECASE)
+            delinq = re.search(r'(Delinquent Taxes.*?Amount Due[^\.]*\.)', clean_text, re.IGNORECASE)
             if delinq:
                 tax_results.append(delinq.group(1).strip())
             
-            # Return our parsed sentences, or an error if the regex found nothing
             return tax_results if tax_results else ["Page loaded, but could not extract specific tax strings."]
             
         except Exception as e:
@@ -86,11 +91,11 @@ def requires_notification(results):
         if "delinquent" in item_lower and "paid" not in item_lower and "$0.00" not in item_lower:
             return True
             
-        # Only do math on the installment lines
+        # Only do math on the actual installment lines
         if "installment" in item_lower:
             found_installments = True
             
-            # If the text says it's already paid or redeemed, add $0 to our due amount
+            # If the text explicitly says it's already paid or redeemed, skip it ($0 due)
             if "paid" in item_lower or "redeemed" in item_lower:
                 continue
             
@@ -102,7 +107,7 @@ def requires_notification(results):
                 
     # 3. The Decision
     if found_installments:
-        return amount_due > 0  # True if you owe money, False if it's all paid
+        return amount_due > 0  # True if you owe money, False if both are paid
         
     # Failsafe: if we didn't find any installments to check, alert just in case
     return True
@@ -119,9 +124,9 @@ def send_email(apn, tax_info):
     
     direct_link = f"https://propertytax.alamedacountyca.gov/account-summary?apn={apn}"
     
-    # Plain Text
+    # Plain Text Fallback
     text_content = f"Automated Property Tax Check for APN: {apn}\n\n"
-    text_content += "Results Found:\n"
+    text_content += "Account Summary:\n"
     for item in tax_info:
         text_content += f"- {item}\n"
     text_content += f"\nView the official portal here: {direct_link}"
@@ -169,7 +174,9 @@ if __name__ == "__main__":
     if not APNS_RAW:
         print("Error: PROPERTY_APN secret is empty.")
     else:
+        # Split the string by commas and remove any extra spaces
         apn_list = [apn.strip() for apn in APNS_RAW.split(",") if apn.strip()]
+        
         print(f"Starting Tax Lookup for {len(apn_list)} APN(s)...")
         
         for current_apn in apn_list:
