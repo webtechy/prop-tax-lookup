@@ -127,7 +127,7 @@ if __name__ == "__main__":
         print("Error: PROPERTY_ADDRESSES secret is empty.")
     else:
         # Split the addresses by comma
-        address_list = [addr.strip() for addr in ADDRESSES_RAW.split(",") if addr.strip()]
+        address_list = [addr.strip() for addr in ADDRESSES_RAW.split("|") if addr.strip()]
         print(f"Starting API Lookup for {len(address_list)} propert(ies)...")
         
         master_results = []
