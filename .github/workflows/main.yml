@@ -1,4 +1,4 @@
-name: Monthly Alameda Property Tax Lookup
+name: Monthly Property Tax API Lookup
 
 on:
   schedule:
@@ -6,8 +6,9 @@ on:
   workflow_dispatch: # Allows manual trigger from the "Actions" tab
 
 jobs:
-  scrape:
+  api-lookup:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -21,21 +22,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # Install the Chromium browser and the Linux system libraries it needs
-          playwright install chromium
-          playwright install-deps chromium
 
-      - name: Run lookup script
+      - name: Run API lookup script
         run: python proptaxlookup.py
         env:
-          PROPERTY_APN: ${{ secrets.PROPERTY_APN }}
+          # These must exactly match the names of your GitHub Secrets!
+          PROPERTY_ADDRESSES: ${{ secrets.PROPERTY_ADDRESSES }}
+          RENTCAST_API_KEY: ${{ secrets.RENTCAST_API_KEY }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
-
-      # Optional: Uploads a screenshot if the script fails (helps debugging)
-      - name: Upload Debug Screenshot
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshot
-          path: error_debug.png
